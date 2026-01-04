@@ -12,29 +12,32 @@ def setup(bot):
         "event", "These commands help you manage events."
     )
     
-    def format_event_choices(events):
-        from discord import OptionChoice
-
+    async def get_event_choices(ctx):
+        """
+        Fetch events for the current guild and return them as a list of strings for autocomplete.
+        """
+        events = get_events_for_guild(ctx.interaction.guild_id)
         return [
-            OptionChoice(
-                name=f"{event['id']} - {event['name']} - {event['date']}",
+            discord.OptionChoice(
+                name=f"{event['id']} - {event['event_name']} - {event['event_date']}",
                 value=str(event['id'])
             )
             for event in events
         ]
 
-    
     @event.command()
     async def new(
         ctx,
         name = discord.Option(
             str,
+            name="event_name",
             description="The name of the event",
             required=True,
             max_length=50,
         ),
         date = discord.Option(
             str,
+            name="event_date",
             description="The date of the event (e.g., DD-MM-YYYY HH:M)",
             required=True,
             min_length=16,
@@ -42,14 +45,16 @@ def setup(bot):
         ),
         location = discord.Option(
             str,
+            name="event_location",
             description="The location of the event",
-            default="To be determined",
+            required=False,
             max_length=50,
         ),
         channel = discord.Option(
             discord.TextChannel,
+            name="announcement_channel",
             description="The channel where the event will be announced",
-            default=None,
+            required=False,
         ),
     ):
         """Create a new event."""
@@ -57,18 +62,20 @@ def setup(bot):
             # Fetch the guild configuration
             config = get_config_for_guild(ctx.guild.id)
             
+            # Format the date before saving or displaying
             valid_datetime = datetime.strptime(date, "%d-%m-%Y %H:%M")
-            
+            formatted_date = valid_datetime.strftime("%d-%m-%Y %H:%M")
+
             create_event(
                 guild_id=ctx.guild.id,
                 user_id=ctx.author.id,
                 channel_id=channel.id if channel else config["default_event_channel"],
                 event_name=name,
-                event_date=valid_datetime,
-                event_location=location
+                event_date=formatted_date,  # Save the formatted date
+                event_location=location if location else config["default_event_location"],
             )
             
-            latest_event = get_latest_event(ctx.guild.id, channel.id)
+            latest_event = get_latest_event(ctx.guild.id)
             if latest_event is None:
                 latest_event['id'] = 'not found'
                 await ctx.respond("Error retrieving the newly created event. Check list to see if it was created.")
@@ -86,42 +93,49 @@ def setup(bot):
         ctx,
         event_id = discord.Option(
             str,
-            description="The name of the event",
-            max_length=50,
-            required=False,
+            name="event",
+            description="Select an event to edit",
+            autocomplete=get_event_choices,
+            required=True,
+        ),
+        reason = discord.Option(
+            str,
+            name="edit_reason",
+            description="Reason for editing the event",
+            max_length=140,
+            min_length=10,
+            required=True
         ),
         name = discord.Option(
             str,
+            name="event_name",
             description="The name of the event",
             max_length=50,
             required=False,
         ),
         date = discord.Option(
             str,
-            description="The date of the event (e.g., DD-MM-YYYY HH:M)",
+            name="event_date",
+            description="The date of the event (e.g., DD-MM-YYYY HH:MM)",
             required=False,
             min_length=16,
             max_length=16,
         ),
         location = discord.Option(
             str,
+            name="event_location",
             description="The location of the event",
             max_length=50,
             required=False,
         ),
         channel = discord.Option(
             discord.TextChannel,
+            name="announcement_channel",
             description="The channel where the event will be announced",
             required=False,
         ),
-        reason = discord.Option(
-            str,
-            description="Reason for editing the event",
-            max_length=140,
-            min_length=10,
-            required=True
-        ),
     ):
+        """Edit an existing event."""
         try:
             if date is not None:
                 valid_datetime = datetime.strptime(date, "%d-%m-%Y %H:%M")
@@ -130,24 +144,24 @@ def setup(bot):
             target_event = get_event_by_id(event_id)
 
             # Compare and use the values from target_event if identical or None
-            name = name if name and name != target_event['name'] else target_event['name']
-            valid_datetime = valid_datetime if date and valid_datetime != target_event['date'] else target_event['date']
-            location = location if location and location != target_event['location'] else target_event['location']
+            name = name if name and name != target_event['event_name'] else target_event['event_name']
+            valid_datetime = valid_datetime if date and valid_datetime != target_event['event_date'] else target_event['event_date']
+            location = location if location and location != target_event['event_location'] else target_event['event_location']
             channel = channel if channel and channel.id != target_event['channel_id'] else target_event['channel_id']
+            edited_by_id = ctx.author.id
             
             """Edit an existing event."""
-            edit_event(
+            edited_event = edit_event(
                 event_id,
-                channel=channel.id if channel else None,
+                channel_id=channel.id if isinstance(channel, discord.TextChannel) else channel,
                 event_name=name,
-                event_date=valid_datetime if date else None,
-                event_location=location if location else "To be determined",
-                user_id=ctx.author.id,
-                reason=reason if reason else "No reason provided",
+                event_date=valid_datetime,
+                event_location=location,
+                edited_by=edited_by_id,
+                edited_reason=reason if reason else "No reason provided",
             )
 
-            edited_event = get_event_by_id(event_id)
-            embed = await event_embed(edited_event, bot, context="edit")
+            embed = await event_embed(edited_event, bot, context="edited")
             await ctx.respond(embed=embed)
         except ValueError:
             # Handle invalid time format
@@ -156,16 +170,54 @@ def setup(bot):
             )
 
     @event.command()
-    async def cancel(ctx, event_id: str):
+    async def cancel(
+        ctx,
+        event_id = discord.Option(
+            str,
+            name="event",
+            description="Select an event to cancel",
+            autocomplete=get_event_choices,
+            required=True,
+        ),
+        reason = discord.Option(
+            str,
+            name="cancel_reason",
+            description="Reason for cancelling the event",
+            max_length=140,
+            min_length=10,
+            required=True
+        ),
+    ):
         """Cancel an event."""
-        cancel_event(int(event_id.split(" - ")[0]), ctx.author.id)
-        await ctx.respond(f"Event ID {event_id.split(' - ')[0]} has been cancelled.")
+        cancelled_event=cancel_event(event_id, ctx.author.id, reason)
+        
+        embed = await event_embed(cancelled_event, bot, context="cancelled")
+        await ctx.respond(embed=embed)
 
     @event.command()
-    async def uncancel(ctx, event_id: int):
-        """Uncancel an event."""
-        uncancel_event(event_id, ctx.author.id)
-        await ctx.respond(f"Event ID {event_id} has been uncancelled.")
+    async def uncancel(
+        ctx,
+        event_id = discord.Option(
+            str,
+            name="event",
+            description="Select an event to uncancel",
+            autocomplete=get_event_choices,
+            required=True,
+        ),
+        reason = discord.Option(
+            str,
+            name="cancel_reason",
+            description="Reason for uncancelling the event",
+            max_length=140,
+            min_length=10,
+            required=True
+        ),
+    ):
+        """Cancel an event."""
+        cancelled_event=uncancel_event(event_id, ctx.author.id, reason)
+        
+        embed = await event_embed(cancelled_event, bot, context="uncancelled")
+        await ctx.respond(embed=embed)
 
     @event.command()
     async def list(ctx):
@@ -192,3 +244,23 @@ def setup(bot):
         pages_list = create_event_list(events, title="Your Events")
         paginator = pages.Paginator(pages=pages_list)
         await paginator.respond(ctx.interaction)
+        
+    @event.command()
+    async def view(
+        ctx,
+        event_id = discord.Option(
+            str,
+            name="event",
+            description="Select an event to view",
+            autocomplete=get_event_choices,
+            required=True,
+        ),
+    ):
+        """View details of a specific event."""
+        event_data = get_event_by_id(event_id)
+        if not event_data:
+            await ctx.respond(f"Event with ID {event_id} not found.")
+            return
+        
+        embed = await event_embed(event_data, bot, context="read")
+        await ctx.respond(embed=embed)
